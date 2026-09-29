@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import {
   ArrowLeft,
   School,
@@ -13,20 +13,71 @@ import {
   Play,
   Lock,
   ShieldCheck,
+  CloudOff,
 } from 'lucide-react';
 import { useApp } from '../context/AppContext';
 
 export const LessonRunnerScreen: React.FC = () => {
-  const { runnerPlanId, plans, activities, goBack, setTab, toggleRunnerStep, showToast } = useApp();
+  const {
+    runnerPlanId,
+    plans,
+    activities,
+    goBack,
+    setTab,
+    toggleRunnerStep,
+    showToast,
+    isOnline,
+    saveRunnerProgress,
+    getRunnerProgress,
+  } = useApp();
 
   const plan = plans.find(p => p.id === runnerPlanId) || plans[0];
   const activity = activities.find(a => a.id === plan.activityId) || activities[0];
 
-  const [timerRunning, setTimerRunning] = useState(true);
-  const [minutesElapsed, setMinutesElapsed] = useState(14);
+  // Restore timer state and minutes elapsed from local safe storage
+  const [timerRunning, setTimerRunning] = useState(() => {
+    const saved = getRunnerProgress(plan.id);
+    return saved?.timerRunning ?? true;
+  });
+
+  const [minutesElapsed, setMinutesElapsed] = useState(() => {
+    const saved = getRunnerProgress(plan.id);
+    return saved?.minutesElapsed ?? 0;
+  });
+
+  const [seconds, setSeconds] = useState(0);
 
   const completedSteps = plan.completedStepIds || [];
   const doneCount = completedSteps.length;
+
+  // Active seconds ticking for the timer
+  useEffect(() => {
+    let interval: any = null;
+    if (timerRunning) {
+      interval = setInterval(() => {
+        setSeconds(prev => {
+          if (prev >= 59) {
+            setMinutesElapsed(m => m + 1);
+            return 0;
+          }
+          return prev + 1;
+        });
+      }, 1000);
+    }
+    return () => {
+      if (interval) clearInterval(interval);
+    };
+  }, [timerRunning]);
+
+  // Continuously persist runner progress to local storage so connection loss never loses state
+  useEffect(() => {
+    saveRunnerProgress(plan.id, {
+      completedStepIds: completedSteps,
+      minutesElapsed,
+      timerRunning,
+      updatedAt: Date.now(),
+    });
+  }, [plan.id, completedSteps, minutesElapsed, timerRunning]);
 
   const handleToggleTimer = () => {
     setTimerRunning(prev => !prev);
@@ -37,6 +88,8 @@ export const LessonRunnerScreen: React.FC = () => {
     showToast(`Session "${plan.title}" marked completed! Logged locally.`);
     setTab('my-plans');
   };
+
+  const formattedSeconds = String(seconds).padStart(2, '0');
 
   return (
     <div id="screen-lesson-runner" className="flex-1 flex flex-col bg-[#F8FAF9] relative pb-28 overflow-y-auto">
@@ -66,13 +119,27 @@ export const LessonRunnerScreen: React.FC = () => {
           </div>
         </div>
 
-        <div className="bg-gray-100/80 px-4 py-1.5 flex items-center justify-between text-gray-600 text-[11px] border-t border-gray-200/60">
+        {/* Offline Protection Notice Bar */}
+        <div className={`px-4 py-1.5 flex items-center justify-between text-[11px] border-t transition-colors ${
+          isOnline
+            ? 'bg-gray-100/80 border-gray-200/60 text-gray-700'
+            : 'bg-amber-100/90 border-amber-300 text-amber-900 font-medium'
+        }`}>
           <div className="flex items-center gap-1.5">
-            <ShieldCheck className="w-3.5 h-3.5 text-[#0F766E]" />
-            <span className="font-medium text-gray-800">
-              Works offline · Session progress cached on tablet
+            {isOnline ? (
+              <ShieldCheck className="w-3.5 h-3.5 text-[#0F766E]" />
+            ) : (
+              <CloudOff className="w-3.5 h-3.5 text-amber-700" />
+            )}
+            <span>
+              {isOnline
+                ? 'Working offline-ready · Session progress cached on tablet'
+                : 'Connection lost · Running 100% offline with zero data loss'}
             </span>
           </div>
+          <span className="font-mono font-bold text-[#0F766E]">
+            {minutesElapsed}:{formattedSeconds}
+          </span>
         </div>
       </header>
 
@@ -87,7 +154,7 @@ export const LessonRunnerScreen: React.FC = () => {
             </span>
             <span className="inline-flex items-center gap-1 font-medium">
               <Clock className="w-3.5 h-3.5" />
-              <span>{plan.durationMinutes} min total</span>
+              <span>{plan.durationMinutes} min planned</span>
             </span>
           </div>
 
@@ -259,7 +326,7 @@ export const LessonRunnerScreen: React.FC = () => {
                   {timerRunning ? 'Pause Timer' : 'Resume Timer'}
                 </div>
                 <div className="font-mono text-[12px] font-bold text-[#0F766E]">
-                  {plan.durationMinutes}m planned
+                  {minutesElapsed}m {formattedSeconds}s
                 </div>
               </div>
             </button>

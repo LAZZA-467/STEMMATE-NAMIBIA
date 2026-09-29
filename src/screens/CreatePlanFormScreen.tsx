@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import {
   ArrowLeft,
   CheckCircle2,
@@ -12,25 +12,87 @@ import {
   AlertTriangle,
   Info,
   Clock,
+  CloudOff,
+  ShieldCheck,
 } from 'lucide-react';
 import { useApp } from '../context/AppContext';
 import { TEMPLATES } from '../data/mockData';
 import { PlanStep, SessionPlan } from '../types';
 
 export const CreatePlanFormScreen: React.FC = () => {
-  const { selectedPlanActivity, saveNewPlan, goBack } = useApp();
+  const {
+    selectedPlanActivity,
+    saveNewPlan,
+    goBack,
+    isOnline,
+    saveDraft,
+    getDraft,
+    showToast,
+  } = useApp();
 
-  const [title, setTitle] = useState(`${selectedPlanActivity.title} Field Session`);
-  const [template, setTemplate] = useState('60-min investigation');
-  const [groupSize, setGroupSize] = useState(16);
-  const [date, setDate] = useState('2026-10-15');
-  const [startTime, setStartTime] = useState('10:00');
+  const activityId = selectedPlanActivity.id;
+
+  // Initialize from saved draft if available, otherwise default
+  const [title, setTitle] = useState(() => {
+    const existing = getDraft(activityId);
+    return existing?.title || `${selectedPlanActivity.title} Field Session`;
+  });
+
+  const [template, setTemplate] = useState(() => {
+    const existing = getDraft(activityId);
+    return existing?.template || '60-min investigation';
+  });
+
+  const [groupSize, setGroupSize] = useState(() => {
+    const existing = getDraft(activityId);
+    return existing?.groupSize ?? 16;
+  });
+
+  const [date, setDate] = useState(() => {
+    const existing = getDraft(activityId);
+    return existing?.date || '2026-10-15';
+  });
+
+  const [startTime, setStartTime] = useState(() => {
+    const existing = getDraft(activityId);
+    return existing?.startTime || '10:00';
+  });
+
   const [station] = useState('Outdoor Lab Station 04');
-  const [steps, setSteps] = useState<PlanStep[]>(
-    TEMPLATES['60-min investigation'] ? TEMPLATES['60-min investigation'].steps : []
-  );
+
+  const [steps, setSteps] = useState<PlanStep[]>(() => {
+    const existing = getDraft(activityId);
+    if (existing?.steps && existing.steps.length > 0) {
+      return existing.steps;
+    }
+    return TEMPLATES['60-min investigation'] ? TEMPLATES['60-min investigation'].steps : [];
+  });
+
   const [isSaving, setIsSaving] = useState(false);
   const [errors, setErrors] = useState<Record<string, string>>({});
+  const isFirstMount = useRef(true);
+
+  // Inform user if restored from offline draft
+  useEffect(() => {
+    const existing = getDraft(activityId);
+    if (existing && isFirstMount.current) {
+      showToast('Restored draft from device memory · Zero data loss', 'success');
+      isFirstMount.current = false;
+    }
+  }, [activityId]);
+
+  // Continuous Auto-Save on any change
+  useEffect(() => {
+    saveDraft(activityId, {
+      title,
+      template,
+      groupSize,
+      date,
+      startTime,
+      steps,
+      updatedAt: Date.now(),
+    });
+  }, [activityId, title, template, groupSize, date, startTime, steps]);
 
   // Auto-switch steps when template changes
   const handleTemplateChange = (tmplKey: string) => {
@@ -134,11 +196,26 @@ export const CreatePlanFormScreen: React.FC = () => {
           </div>
         </div>
 
+        {/* Real-time Offline Safe Autosave Status Badge */}
         <div className="flex items-center gap-1.5 px-2.5 py-1 bg-emerald-50 rounded-full border border-emerald-200 text-emerald-800 text-[11px] font-semibold">
-          <CheckCircle2 className="w-3.5 h-3.5 text-emerald-600" />
-          <span>Draft Saved ✓</span>
+          <ShieldCheck className="w-3.5 h-3.5 text-emerald-600" />
+          <span>{isOnline ? 'Autosaved ✓' : 'Offline Saved ✓'}</span>
         </div>
       </header>
+
+      {/* Connection Notice Callout inside the Form */}
+      {!isOnline && (
+        <div className="bg-amber-50/90 border-b border-amber-200 px-4 py-2 flex items-center justify-between text-xs text-amber-900">
+          <div className="flex items-center gap-2">
+            <CloudOff className="w-4 h-4 text-amber-700 shrink-0" />
+            <span>Connection lost · Every keystroke is saved on this device.</span>
+          </div>
+          <span className="font-semibold text-emerald-700 flex items-center gap-1">
+            <CheckCircle2 className="w-3 h-3" />
+            Protected
+          </span>
+        </div>
+      )}
 
       {/* Form Content */}
       <div className="flex-1 overflow-y-auto px-4 py-4 space-y-4 pb-28">
@@ -211,6 +288,7 @@ export const CreatePlanFormScreen: React.FC = () => {
               type="text"
               value={title}
               onChange={e => setTitle(e.target.value)}
+              placeholder="e.g. Water Filtration Column Challenge"
               className="w-full min-h-[44px] px-3 bg-white rounded-xl border border-gray-300 text-[13px] font-semibold text-gray-900 focus:outline-none focus:ring-2 focus:ring-[#0F766E]"
             />
             {errors.title && <p className="text-[11px] text-rose-600 font-semibold">{errors.title}</p>}

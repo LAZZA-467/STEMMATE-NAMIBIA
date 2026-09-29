@@ -17,6 +17,24 @@ import {
   REMOTE_PLAN_EDITS,
   STAFF_CODE,
 } from '../data/mockData';
+import { safeStorage } from '../data/storage';
+
+export interface PlanDraftData {
+  title: string;
+  template: string;
+  groupSize: number;
+  date: string;
+  startTime: string;
+  steps: any[];
+  updatedAt: number;
+}
+
+export interface RunnerProgressData {
+  completedStepIds: string[];
+  minutesElapsed: number;
+  timerRunning: boolean;
+  updatedAt: number;
+}
 
 interface AppContextType {
   role: UserRole;
@@ -42,13 +60,14 @@ interface AppContextType {
   mobileData: boolean;
   toast: { message: string; type: 'sync' | 'offline' | 'success' | 'alert' } | null;
   devicePlatform: 'ios' | 'android' | 'responsive';
-  
+  offlineReason: string | null;
+
   // Navigation
   go: (screen: string) => void;
   goBack: () => void;
   setTab: (tab: 'home' | 'explore' | 'my-plans' | 'kit' | 'settings') => void;
   setDevicePlatform: (p: 'ios' | 'android' | 'responsive') => void;
-  
+
   // Actions
   setRole: (role: UserRole) => void;
   toggleOnline: () => void;
@@ -80,6 +99,13 @@ interface AppContextType {
   showToast: (message: string, type?: 'sync' | 'offline' | 'success' | 'alert') => void;
   resetState: () => void;
   signOut: () => void;
+
+  // Zero-data-loss drafts & runner progress
+  saveDraft: (activityId: string, draft: PlanDraftData) => void;
+  getDraft: (activityId: string) => PlanDraftData | null;
+  clearDraft: (activityId: string) => void;
+  saveRunnerProgress: (planId: string, progress: RunnerProgressData) => void;
+  getRunnerProgress: (planId: string) => RunnerProgressData | null;
 }
 
 const defaultFilter: PlanFilter = {
@@ -92,9 +118,25 @@ const defaultFilter: PlanFilter = {
 const AppContext = createContext<AppContextType | undefined>(undefined);
 
 export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => {
-  const [role, setRoleState] = useState<UserRole>('Teacher');
-  const [isOnline, setIsOnline] = useState<boolean>(true);
-  const [syncState, setSyncState] = useState<SyncStatus>('synced');
+  const [role, setRoleState] = useState<UserRole>(() => safeStorage.getItem('stemmate_role', 'Teacher'));
+  
+  // Real browser online status detection with fallback
+  const [isOnline, setIsOnline] = useState<boolean>(() => {
+    if (typeof navigator !== 'undefined') {
+      return navigator.onLine;
+    }
+    return true;
+  });
+
+  const [syncState, setSyncState] = useState<SyncStatus>(() => {
+    if (typeof navigator !== 'undefined' && !navigator.onLine) {
+      return 'offline';
+    }
+    return 'synced';
+  });
+
+  const [offlineReason, setOfflineReason] = useState<string | null>(null);
+
   const [activeTab, setActiveTab] = useState<'home' | 'explore' | 'my-plans' | 'kit' | 'settings'>('home');
   const [activeScreen, setActiveScreen] = useState<string>('login');
   const [screenHistory, setScreenHistory] = useState<string[]>(['login']);
@@ -103,10 +145,24 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
   const [previewPlan, setPreviewPlan] = useState<SessionPlan | null>(null);
   const [savedSuccessPlan, setSavedSuccessPlan] = useState<SessionPlan | null>(null);
   const [conflict, setConflict] = useState<{ plan: SessionPlan; remote: RemotePlanEdit } | null>(null);
-  const [activities, setActivities] = useState<Activity[]>(INITIAL_ACTIVITIES);
-  const [plans, setPlans] = useState<SessionPlan[]>(INITIAL_PLANS);
-  const [inventory, setInventory] = useState<KitItem[]>(INITIAL_INVENTORY);
-  const [kitRequests, setKitRequests] = useState<KitRequest[]>(INITIAL_KIT_REQUESTS);
+
+  // Persistent data state
+  const [activities, setActivities] = useState<Activity[]>(() =>
+    safeStorage.getItem('stemmate_activities', INITIAL_ACTIVITIES)
+  );
+
+  const [plans, setPlans] = useState<SessionPlan[]>(() =>
+    safeStorage.getItem('stemmate_plans', INITIAL_PLANS)
+  );
+
+  const [inventory, setInventory] = useState<KitItem[]>(() =>
+    safeStorage.getItem('stemmate_inventory', INITIAL_INVENTORY)
+  );
+
+  const [kitRequests, setKitRequests] = useState<KitRequest[]>(() =>
+    safeStorage.getItem('stemmate_kit_requests', INITIAL_KIT_REQUESTS)
+  );
+
   const [planFilter, setPlanFilter] = useState<PlanFilter>(defaultFilter);
   const [selectedPlanActivity, setSelectedPlanActivity] = useState<Activity>(INITIAL_ACTIVITIES[0]);
   const [simulateStorageFull, setSimulateStorageFull] = useState<boolean>(false);
@@ -116,18 +172,70 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
   const [toast, setToast] = useState<{ message: string; type: 'sync' | 'offline' | 'success' | 'alert' } | null>(null);
   const [devicePlatform, setDevicePlatform] = useState<'ios' | 'android' | 'responsive'>('android');
 
+  // Sync to safeStorage whenever plans, inventory, activities, or kitRequests change
+  useEffect(() => {
+    safeStorage.setItem('stemmate_plans', plans);
+  }, [plans]);
+
+  useEffect(() => {
+    safeStorage.setItem('stemmate_activities', activities);
+  }, [activities]);
+
+  useEffect(() => {
+    safeStorage.setItem('stemmate_inventory', inventory);
+  }, [inventory]);
+
+  useEffect(() => {
+    safeStorage.setItem('stemmate_kit_requests', kitRequests);
+  }, [kitRequests]);
+
+  useEffect(() => {
+    safeStorage.setItem('stemmate_role', role);
+  }, [role]);
+
+  // Real browser hardware online/offline event listeners
+  useEffect(() => {
+    const handleBrowserOnline = () => {
+      setIsOnline(true);
+      setSyncState('syncing');
+      setOfflineReason(null);
+      showToast('Connection restored! Synchronizing field updates...', 'sync');
+      setTimeout(() => {
+        completeSync();
+      }, 1200);
+    };
+
+    const handleBrowserOffline = () => {
+      setIsOnline(false);
+      setSyncState('offline');
+      setOfflineReason('Network link dropped');
+      showToast('Connection lost! Working offline · All progress saved locally', 'offline');
+    };
+
+    if (typeof window !== 'undefined') {
+      window.addEventListener('online', handleBrowserOnline);
+      window.addEventListener('offline', handleBrowserOffline);
+    }
+
+    return () => {
+      if (typeof window !== 'undefined') {
+        window.removeEventListener('online', handleBrowserOnline);
+        window.removeEventListener('offline', handleBrowserOffline);
+      }
+    };
+  }, [plans, simulateConflict]);
+
   const showToast = (message: string, type: 'sync' | 'offline' | 'success' | 'alert' = 'success') => {
     setToast({ message, type });
     setTimeout(() => {
       setToast(prev => (prev?.message === message ? null : prev));
-    }, 4000);
+    }, 4500);
   };
 
   const go = (screen: string) => {
     if (activeScreen === screen) return;
     setScreenHistory(prev => [...prev, screen]);
     setActiveScreen(screen);
-    // If it's a root tab, sync tab state
     if (['home', 'explore', 'my-plans', 'kit', 'settings'].includes(screen)) {
       setActiveTab(screen as any);
     }
@@ -158,18 +266,21 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
     setRoleState(newRole);
   };
 
+  // Toggle connection state (allows manual simulation or field testing)
   const toggleOnline = () => {
     if (isOnline) {
       setIsOnline(false);
       setSyncState('offline');
-      showToast('Working offline · Changes saved locally', 'offline');
+      setOfflineReason('Offline mode selected');
+      showToast('Connection lost! Offline mode active · Current progress saved locally', 'offline');
     } else {
       setIsOnline(true);
       setSyncState('syncing');
+      setOfflineReason(null);
       showToast('Connecting to school station network...', 'sync');
       setTimeout(() => {
         completeSync();
-      }, 1400);
+      }, 1200);
     }
   };
 
@@ -202,6 +313,7 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
   const triggerSync = () => {
     if (!isOnline) {
       setIsOnline(true);
+      setOfflineReason(null);
     }
     setSyncState('syncing');
     showToast('Pushing field updates to server...', 'sync');
@@ -241,6 +353,8 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
       return false;
     }
     setPlans(prev => [newPlan, ...prev]);
+    // Clear the active draft for this activity once successfully saved
+    clearDraft(newPlan.activityId);
     setSavedSuccessPlan(newPlan);
     return true;
   };
@@ -388,10 +502,38 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
     showToast('Box returned and verified in cupboard');
   };
 
+  // Drafts zero-data-loss persistence
+  const saveDraft = (activityId: string, draft: PlanDraftData) => {
+    safeStorage.setItem(`stemmate_draft_${activityId}`, draft);
+    safeStorage.setItem('stemmate_last_active_draft_id', activityId);
+  };
+
+  const getDraft = (activityId: string): PlanDraftData | null => {
+    return safeStorage.getItem<PlanDraftData | null>(`stemmate_draft_${activityId}`, null);
+  };
+
+  const clearDraft = (activityId: string) => {
+    safeStorage.removeItem(`stemmate_draft_${activityId}`);
+  };
+
+  // Live runner progress persistence
+  const saveRunnerProgress = (planId: string, progress: RunnerProgressData) => {
+    safeStorage.setItem(`stemmate_runner_${planId}`, progress);
+  };
+
+  const getRunnerProgress = (planId: string): RunnerProgressData | null => {
+    return safeStorage.getItem<RunnerProgressData | null>(`stemmate_runner_${planId}`, null);
+  };
+
   const resetState = () => {
+    safeStorage.removeItem('stemmate_plans');
+    safeStorage.removeItem('stemmate_activities');
+    safeStorage.removeItem('stemmate_inventory');
+    safeStorage.removeItem('stemmate_kit_requests');
     setRoleState('Teacher');
     setIsOnline(true);
     setSyncState('synced');
+    setOfflineReason(null);
     setActivities(INITIAL_ACTIVITIES);
     setPlans(INITIAL_PLANS);
     setInventory(INITIAL_INVENTORY);
@@ -408,10 +550,16 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
   };
 
   const signOut = () => {
+    // Clear all draft keys on sign out
+    Object.keys(localStorage).forEach(k => {
+      if (k.startsWith('stemmate_draft_') || k.startsWith('stemmate_runner_')) {
+        safeStorage.removeItem(k);
+      }
+    });
     setRoleState('Teacher');
     setActiveScreen('login');
     setScreenHistory(['login']);
-    showToast('Signed out. Local session draft caches cleared.');
+    showToast('Signed out. In-progress drafts deleted from this tablet.');
   };
 
   return (
@@ -440,6 +588,7 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
         mobileData,
         toast,
         devicePlatform,
+        offlineReason,
         go,
         goBack,
         setTab,
@@ -474,6 +623,11 @@ export const AppProvider: React.FC<{ children: ReactNode }> = ({ children }) => 
         showToast,
         resetState,
         signOut,
+        saveDraft,
+        getDraft,
+        clearDraft,
+        saveRunnerProgress,
+        getRunnerProgress,
       }}
     >
       {children}
